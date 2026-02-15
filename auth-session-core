@@ -1,0 +1,206 @@
+USE db_planetsoft_barber;
+GO
+
+-- Reduce bloqueos (muy recomendado para app + backoffice)
+ALTER DATABASE db_planetsoft_barber SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+GO
+
+/* ============================================================
+   AUTH TABLES - PlanetSoft Barber (high traffic ready)
+   Tables: users, roles, user_roles, refresh_tokens, auth_audit
+   ============================================================ */
+
+---------------------------------------------------------------
+-- DROP (orden correcto por FKs) - más limpio
+---------------------------------------------------------------
+DROP TABLE IF EXISTS dbo.user_roles;
+DROP TABLE IF EXISTS dbo.refresh_tokens;
+DROP TABLE IF EXISTS dbo.auth_audit;
+DROP TABLE IF EXISTS dbo.roles;
+DROP TABLE IF EXISTS dbo.users;
+GO
+
+---------------------------------------------------------------
+-- 1) USERS
+---------------------------------------------------------------
+CREATE TABLE dbo.users (
+  user_id UNIQUEIDENTIFIER NOT NULL
+    CONSTRAINT DF_users_user_id DEFAULT NEWSEQUENTIALID(),
+
+  email VARCHAR(254) NULL,
+  -- Normalización más robusta ante collations distintos:
+  email_normalized AS (LOWER(email) COLLATE Latin1_General_100_CI_AI) PERSISTED,
+
+  phone_e164 VARCHAR(20) NULL,
+
+  -- subido por seguridad (ARGON2 puede ser más largo)
+  password_hash VARCHAR(500) NOT NULL,
+  password_algo VARCHAR(20) NOT NULL
+    CONSTRAINT DF_users_password_algo DEFAULT ('BCRYPT'),
+
+  full_name NVARCHAR(120) NULL,
+
+  is_email_verified BIT NOT NULL CONSTRAINT DF_users_email_verified DEFAULT (0),
+  is_phone_verified BIT NOT NULL CONSTRAINT DF_users_phone_verified DEFAULT (0),
+
+  status VARCHAR(20) NOT NULL CONSTRAINT DF_users_status DEFAULT ('ACTIVE'),
+  failed_login_count SMALLINT NOT NULL CONSTRAINT DF_users_failed_count DEFAULT (0),
+  lockout_until DATETIME2(3) NULL,
+  last_login_at DATETIME2(3) NULL,
+
+  created_at DATETIME2(3) NOT NULL CONSTRAINT DF_users_created_at DEFAULT SYSUTCDATETIME(),
+  updated_at DATETIME2(3) NOT NULL CONSTRAINT DF_users_updated_at DEFAULT SYSUTCDATETIME(),
+
+  row_version ROWVERSION,
+
+  CONSTRAINT PK_users PRIMARY KEY CLUSTERED (user_id),
+  CONSTRAINT CK_users_status CHECK (status IN ('ACTIVE','SUSPENDED','DELETED')),
+  CONSTRAINT CK_users_algo CHECK (password_algo IN ('BCRYPT','ARGON2')),
+  CONSTRAINT CK_users_email_or_phone CHECK (email IS NOT NULL OR phone_e164 IS NOT NULL)
+);
+GO
+
+CREATE UNIQUE NONCLUSTERED INDEX UX_users_email_normalized
+ON dbo.users(email_normalized)
+WHERE email IS NOT NULL;
+GO
+
+CREATE UNIQUE NONCLUSTERED INDEX UX_users_phone_e164
+ON dbo.users(phone_e164)
+WHERE phone_e164 IS NOT NULL;
+GO
+
+CREATE NONCLUSTERED INDEX IX_users_status_lockout
+ON dbo.users(status, lockout_until)
+INCLUDE (failed_login_count, last_login_at);
+GO
+
+---------------------------------------------------------------
+-- 2) ROLES
+---------------------------------------------------------------
+CREATE TABLE dbo.roles (
+  role_id INT IDENTITY(1,1) NOT NULL,
+  role_code VARCHAR(30) NOT NULL,
+  description NVARCHAR(120) NULL,
+  is_active BIT NOT NULL CONSTRAINT DF_roles_active DEFAULT (1),
+  created_at DATETIME2(3) NOT NULL CONSTRAINT DF_roles_created_at DEFAULT SYSUTCDATETIME(),
+
+  CONSTRAINT PK_roles PRIMARY KEY CLUSTERED (role_id),
+  CONSTRAINT UQ_roles_role_code UNIQUE NONCLUSTERED (role_code)
+);
+GO
+
+---------------------------------------------------------------
+-- 3) USER_ROLES (M:N)
+---------------------------------------------------------------
+CREATE TABLE dbo.user_roles (
+  user_role_id BIGINT IDENTITY(1,1) NOT NULL,
+  user_id UNIQUEIDENTIFIER NOT NULL,
+  role_id INT NOT NULL,
+
+  assigned_at DATETIME2(3) NOT NULL CONSTRAINT DF_user_roles_assigned_at DEFAULT SYSUTCDATETIME(),
+  assigned_by UNIQUEIDENTIFIER NULL,
+
+  CONSTRAINT PK_user_roles PRIMARY KEY CLUSTERED (user_role_id),
+  CONSTRAINT FK_user_roles_user FOREIGN KEY (user_id) REFERENCES dbo.users(user_id),
+  CONSTRAINT FK_user_roles_role FOREIGN KEY (role_id) REFERENCES dbo.roles(role_id),
+  CONSTRAINT UQ_user_roles UNIQUE NONCLUSTERED (user_id, role_id)
+);
+GO
+
+CREATE NONCLUSTERED INDEX IX_user_roles_user
+ON dbo.user_roles(user_id)
+INCLUDE (role_id, assigned_at);
+GO
+
+CREATE NONCLUSTERED INDEX IX_user_roles_role
+ON dbo.user_roles(role_id)
+INCLUDE (user_id, assigned_at);
+GO
+
+---------------------------------------------------------------
+-- 4) REFRESH_TOKENS (sessions)
+---------------------------------------------------------------
+CREATE TABLE dbo.refresh_tokens (
+  refresh_token_id UNIQUEIDENTIFIER NOT NULL
+    CONSTRAINT DF_refresh_tokens_id DEFAULT NEWSEQUENTIALID(),
+
+  user_id UNIQUEIDENTIFIER NOT NULL,
+
+  token_hash VARCHAR(255) NOT NULL,        -- hash only
+  issued_at DATETIME2(3) NOT NULL CONSTRAINT DF_refresh_issued_at DEFAULT SYSUTCDATETIME(),
+  expires_at DATETIME2(3) NOT NULL,
+
+  revoked_at DATETIME2(3) NULL,
+  revoke_reason VARCHAR(60) NULL,
+
+  device_id VARCHAR(80) NULL,
+  user_agent NVARCHAR(300) NULL,
+  ip_address VARCHAR(45) NULL,
+
+  CONSTRAINT PK_refresh_tokens PRIMARY KEY CLUSTERED (refresh_token_id),
+  CONSTRAINT FK_refresh_tokens_user FOREIGN KEY (user_id) REFERENCES dbo.users(user_id),
+  CONSTRAINT CK_refresh_expires CHECK (expires_at > issued_at)
+);
+GO
+
+CREATE UNIQUE NONCLUSTERED INDEX UX_refresh_tokens_hash
+ON dbo.refresh_tokens(token_hash);
+GO
+
+CREATE NONCLUSTERED INDEX IX_refresh_tokens_user_exp
+ON dbo.refresh_tokens(user_id, expires_at DESC)
+INCLUDE (revoked_at, issued_at);
+GO
+
+CREATE NONCLUSTERED INDEX IX_refresh_tokens_expires
+ON dbo.refresh_tokens(expires_at)
+INCLUDE (user_id, revoked_at);
+GO
+
+---------------------------------------------------------------
+-- 5) AUTH_AUDIT (events)
+---------------------------------------------------------------
+CREATE TABLE dbo.auth_audit (
+  audit_id BIGINT IDENTITY(1,1) NOT NULL,
+  user_id UNIQUEIDENTIFIER NULL,
+
+  event_type VARCHAR(30) NOT NULL,
+  event_at DATETIME2(3) NOT NULL CONSTRAINT DF_auth_audit_event_at DEFAULT SYSUTCDATETIME(),
+
+  identifier VARCHAR(254) NULL,
+  ip_address VARCHAR(45) NULL,
+  user_agent NVARCHAR(300) NULL,
+  meta NVARCHAR(1000) NULL,
+
+  CONSTRAINT PK_auth_audit PRIMARY KEY CLUSTERED (audit_id),
+  CONSTRAINT FK_auth_audit_user FOREIGN KEY (user_id) REFERENCES dbo.users(user_id),
+  CONSTRAINT CK_auth_audit_event CHECK (event_type IN (
+    'REGISTER','LOGIN_SUCCESS','LOGIN_FAIL','LOGOUT','REFRESH','PASSWORD_CHANGE'
+  ))
+);
+GO
+
+CREATE NONCLUSTERED INDEX IX_auth_audit_user_time
+ON dbo.auth_audit(user_id, event_at DESC)
+WHERE user_id IS NOT NULL;
+GO
+
+CREATE NONCLUSTERED INDEX IX_auth_audit_identifier_time
+ON dbo.auth_audit(identifier, event_at DESC)
+WHERE identifier IS NOT NULL;
+GO
+
+---------------------------------------------------------------
+-- SEED ROLES
+---------------------------------------------------------------
+INSERT INTO dbo.roles(role_code, description)
+SELECT v.role_code, v.description
+FROM (VALUES
+  ('ADMIN','PlanetSoft Admin'),
+  ('CUSTOMER','Customer'),
+  ('BARBER_OWNER','Barber shop owner'),
+  ('BARBER_STAFF','Barber staff')
+) v.(role_code, description)
+WHERE NOT EXISTS (SELECT 1 FROM dbo.roles r WHERE r.role_code = v.role_code);
+GO
