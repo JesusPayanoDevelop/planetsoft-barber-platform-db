@@ -204,3 +204,1777 @@ FROM (VALUES
 ) v.(role_code, description)
 WHERE NOT EXISTS (SELECT 1 FROM dbo.roles r WHERE r.role_code = v.role_code);
 GO
+
+
+---------------  tablas adicionales 
+
+/* ============================================================
+   A) DOCUMENT TYPES + USER/TENANT DOCUMENTS (DNI/CE/PASSPORT/RUC)
+   ============================================================ */
+
+IF OBJECT_ID('dbo.document_types','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.document_types (
+    document_type_id INT IDENTITY(1,1) NOT NULL,
+    doc_type_code    VARCHAR(20) NOT NULL,  -- DNI|CE|PASSPORT|RUC
+    description      NVARCHAR(100) NOT NULL,
+    is_active        BIT NOT NULL CONSTRAINT DF_doc_types_active DEFAULT 1,
+    created_at       DATETIME2(3) NOT NULL CONSTRAINT DF_doc_types_created DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_document_types PRIMARY KEY (document_type_id),
+    CONSTRAINT UQ_document_types_code UNIQUE (doc_type_code)
+  );
+END;
+
+IF OBJECT_ID('dbo.user_documents','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.user_documents (
+    user_document_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_user_document_id DEFAULT NEWSEQUENTIALID(),
+    user_id          UNIQUEIDENTIFIER NOT NULL,
+    document_type_id INT NOT NULL,
+    document_number  NVARCHAR(30) NOT NULL,
+    country_code     CHAR(2) NULL,
+    is_verified      BIT NOT NULL CONSTRAINT DF_user_doc_verified DEFAULT 0,
+    verified_at      DATETIME2(3) NULL,
+    created_at       DATETIME2(3) NOT NULL CONSTRAINT DF_user_doc_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_user_documents PRIMARY KEY (user_document_id),
+    CONSTRAINT FK_user_documents_user FOREIGN KEY (user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT FK_user_documents_type FOREIGN KEY (document_type_id) REFERENCES dbo.document_types(document_type_id)
+  );
+
+  CREATE UNIQUE INDEX UX_user_documents_type_number ON dbo.user_documents(document_type_id, document_number);
+  CREATE INDEX IX_user_documents_user ON dbo.user_documents(user_id, created_at);
+END;
+
+IF OBJECT_ID('dbo.tenant_documents','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_documents (
+    tenant_document_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_tenant_document_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id          UNIQUEIDENTIFIER NOT NULL,
+    document_type_id   INT NOT NULL,       -- normalmente RUC
+    document_number    NVARCHAR(30) NOT NULL,
+    country_code       CHAR(2) NULL,
+    is_verified        BIT NOT NULL CONSTRAINT DF_tenant_doc_verified DEFAULT 0,
+    verified_at        DATETIME2(3) NULL,
+    created_at         DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_doc_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_tenant_documents PRIMARY KEY (tenant_document_id),
+    CONSTRAINT FK_tenant_documents_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_tenant_documents_type FOREIGN KEY (document_type_id) REFERENCES dbo.document_types(document_type_id)
+  );
+
+  CREATE UNIQUE INDEX UX_tenant_documents_type_number ON dbo.tenant_documents(document_type_id, document_number);
+  CREATE INDEX IX_tenant_documents_tenant ON dbo.tenant_documents(tenant_id, created_at);
+END;
+
+/* seed document types */
+IF NOT EXISTS (SELECT 1 FROM dbo.document_types WHERE doc_type_code = 'DNI')
+  INSERT INTO dbo.document_types(doc_type_code, description) VALUES ('DNI', 'Documento Nacional de Identidad');
+
+IF NOT EXISTS (SELECT 1 FROM dbo.document_types WHERE doc_type_code = 'CE')
+  INSERT INTO dbo.document_types(doc_type_code, description) VALUES ('CE', 'Carnet de Extranjería');
+
+IF NOT EXISTS (SELECT 1 FROM dbo.document_types WHERE doc_type_code = 'PASSPORT')
+  INSERT INTO dbo.document_types(doc_type_code, description) VALUES ('PASSPORT', 'Pasaporte');
+
+IF NOT EXISTS (SELECT 1 FROM dbo.document_types WHERE doc_type_code = 'RUC')
+  INSERT INTO dbo.document_types(doc_type_code, description) VALUES ('RUC', 'Registro Único de Contribuyentes');
+
+
+/* ============================================================
+   B) USER PROFILE + TENANT PROFILE (avatar/logo/contact)
+   ============================================================ */
+
+IF OBJECT_ID('dbo.user_profiles','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.user_profiles (
+    user_id     UNIQUEIDENTIFIER NOT NULL,
+    first_name  NVARCHAR(80) NULL,
+    last_name   NVARCHAR(80) NULL,
+    birth_date  DATE NULL,
+    gender      VARCHAR(20) NULL,
+
+    avatar_url  NVARCHAR(600) NULL,
+
+    created_at  DATETIME2(3) NOT NULL CONSTRAINT DF_user_profiles_created DEFAULT SYSUTCDATETIME(),
+    updated_at  DATETIME2(3) NOT NULL CONSTRAINT DF_user_profiles_updated DEFAULT SYSUTCDATETIME(),
+    row_version ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_user_profiles PRIMARY KEY (user_id),
+    CONSTRAINT FK_user_profiles_user FOREIGN KEY (user_id) REFERENCES dbo.users(user_id)
+  );
+END;
+
+IF OBJECT_ID('dbo.tenant_profiles','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_profiles (
+    tenant_id          UNIQUEIDENTIFIER NOT NULL,
+    legal_name         NVARCHAR(200) NULL,
+    contact_email      NVARCHAR(120) NULL,
+    contact_phone_e164 VARCHAR(20) NULL,
+
+    logo_url           NVARCHAR(600) NULL,
+    cover_url          NVARCHAR(600) NULL,
+
+    created_at         DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_profiles_created DEFAULT SYSUTCDATETIME(),
+    updated_at         DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_profiles_updated DEFAULT SYSUTCDATETIME(),
+    row_version        ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_tenant_profiles PRIMARY KEY (tenant_id),
+    CONSTRAINT FK_tenant_profiles_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id)
+  );
+
+  CREATE INDEX IX_tenant_profiles_contact_email ON dbo.tenant_profiles(contact_email);
+END;
+
+
+/* ============================================================
+   C) MEDIA ASSETS (para avatar/logo/items/gallery)
+   ============================================================ */
+
+IF OBJECT_ID('dbo.media_assets','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.media_assets (
+    media_id       UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_media_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id      UNIQUEIDENTIFIER NULL,
+    owner_user_id  UNIQUEIDENTIFIER NULL,
+
+    media_type     VARCHAR(30) NOT NULL, -- AVATAR|TENANT_LOGO|TENANT_COVER|ITEM_IMAGE|GALLERY
+    url            NVARCHAR(600) NOT NULL,
+    content_type   VARCHAR(100) NULL,
+    size_bytes     BIGINT NULL,
+    checksum       VARCHAR(128) NULL,
+
+    created_at     DATETIME2(3) NOT NULL CONSTRAINT DF_media_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_media_assets PRIMARY KEY (media_id),
+    CONSTRAINT FK_media_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_media_user FOREIGN KEY (owner_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_media_type CHECK (media_type IN ('AVATAR','TENANT_LOGO','TENANT_COVER','ITEM_IMAGE','GALLERY'))
+  );
+
+  CREATE INDEX IX_media_tenant_created ON dbo.media_assets(tenant_id, created_at);
+  CREATE INDEX IX_media_user_created ON dbo.media_assets(owner_user_id, created_at);
+END;
+
+
+/* ============================================================
+   D) CATALOG: categories + items (SERVICE/PRODUCT) + item media
+   ============================================================ */
+
+IF OBJECT_ID('dbo.tenant_catalog_categories','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_catalog_categories (
+    category_id    UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_cat_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id      UNIQUEIDENTIFIER NOT NULL,
+    category_code  VARCHAR(40) NOT NULL,
+    name           NVARCHAR(120) NOT NULL,
+    sort_order     INT NOT NULL CONSTRAINT DF_cat_sort DEFAULT 0,
+    is_active      BIT NOT NULL CONSTRAINT DF_cat_active DEFAULT 1,
+    created_at     DATETIME2(3) NOT NULL CONSTRAINT DF_cat_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_tenant_catalog_categories PRIMARY KEY (category_id),
+    CONSTRAINT FK_cat_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT UQ_cat_tenant_code UNIQUE (tenant_id, category_code)
+  );
+
+  CREATE INDEX IX_cat_tenant_active ON dbo.tenant_catalog_categories(tenant_id, is_active);
+END;
+
+IF OBJECT_ID('dbo.tenant_catalog_items','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_catalog_items (
+    catalog_item_id   UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_item_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+    branch_id         UNIQUEIDENTIFIER NULL, -- NULL = aplica a todo el tenant
+    category_id       UNIQUEIDENTIFIER NULL,
+
+    item_type         VARCHAR(20) NOT NULL,  -- SERVICE|PRODUCT
+    sku               VARCHAR(50) NULL,      -- solo PRODUCT
+    name              NVARCHAR(150) NOT NULL,
+    description       NVARCHAR(1000) NULL,
+
+    currency_code     CHAR(3) NOT NULL,
+    base_price        DECIMAL(18,2) NOT NULL,
+    duration_minutes  INT NULL,              -- para SERVICE
+
+    is_active         BIT NOT NULL CONSTRAINT DF_item_active DEFAULT 1,
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_item_created DEFAULT SYSUTCDATETIME(),
+    updated_at        DATETIME2(3) NOT NULL CONSTRAINT DF_item_updated DEFAULT SYSUTCDATETIME(),
+    row_version       ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_tenant_catalog_items PRIMARY KEY (catalog_item_id),
+    CONSTRAINT FK_item_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_item_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+    CONSTRAINT FK_item_category FOREIGN KEY (category_id) REFERENCES dbo.tenant_catalog_categories(category_id),
+    CONSTRAINT CK_item_type CHECK (item_type IN ('SERVICE','PRODUCT')),
+    CONSTRAINT CK_item_price CHECK (base_price >= 0),
+    CONSTRAINT CK_item_duration CHECK (duration_minutes IS NULL OR duration_minutes > 0)
+  );
+
+  CREATE INDEX IX_items_tenant_type_active ON dbo.tenant_catalog_items(tenant_id, item_type, is_active);
+  CREATE INDEX IX_items_tenant_branch ON dbo.tenant_catalog_items(tenant_id, branch_id);
+END;
+
+IF OBJECT_ID('dbo.catalog_item_media','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.catalog_item_media (
+    catalog_item_id  UNIQUEIDENTIFIER NOT NULL,
+    media_id         UNIQUEIDENTIFIER NOT NULL,
+    is_primary       BIT NOT NULL CONSTRAINT DF_cim_primary DEFAULT 0,
+    sort_order       INT NOT NULL CONSTRAINT DF_cim_sort DEFAULT 0,
+
+    CONSTRAINT PK_catalog_item_media PRIMARY KEY (catalog_item_id, media_id),
+    CONSTRAINT FK_cim_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+    CONSTRAINT FK_cim_media FOREIGN KEY (media_id) REFERENCES dbo.media_assets(media_id)
+  );
+
+  CREATE INDEX IX_cim_media ON dbo.catalog_item_media(media_id);
+END;
+
+
+/* ============================================================
+   E) INVENTORY (solo PRODUCT) + uniqueness por tenant/branch/item
+   ============================================================ */
+
+IF OBJECT_ID('dbo.inventory_items','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.inventory_items (
+    inventory_item_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_inv_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+    branch_id         UNIQUEIDENTIFIER NULL,
+    catalog_item_id   UNIQUEIDENTIFIER NOT NULL,
+
+    qty_on_hand       INT NOT NULL CONSTRAINT DF_inv_qty DEFAULT 0,
+    qty_reserved      INT NOT NULL CONSTRAINT DF_inv_res DEFAULT 0,
+
+    updated_at        DATETIME2(3) NOT NULL CONSTRAINT DF_inv_updated DEFAULT SYSUTCDATETIME(),
+    row_version       ROWVERSION NOT NULL,
+
+    branch_key AS (CONVERT(BINARY(16), ISNULL(branch_id, '00000000-0000-0000-0000-000000000000'))) PERSISTED,
+
+    CONSTRAINT PK_inventory_items PRIMARY KEY (inventory_item_id),
+    CONSTRAINT FK_inv_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_inv_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+    CONSTRAINT FK_inv_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+    CONSTRAINT CK_inv_qty CHECK (qty_on_hand >= 0 AND qty_reserved >= 0)
+  );
+
+  CREATE UNIQUE INDEX UX_inv_tenant_branch_item ON dbo.inventory_items(tenant_id, branch_key, catalog_item_id);
+END;
+
+
+/* ============================================================
+   F) APPOINTMENTS (reservas tipo Hostelworld) + lines
+   ============================================================ */
+
+IF OBJECT_ID('dbo.appointments','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.appointments (
+    appointment_id    UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_appt_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+    branch_id         UNIQUEIDENTIFIER NULL,
+
+    customer_user_id  UNIQUEIDENTIFIER NOT NULL,  -- quien reserva
+    staff_user_id     UNIQUEIDENTIFIER NULL,      -- quien atiende (opcional)
+
+    status            VARCHAR(20) NOT NULL,       -- PENDING|CONFIRMED|CANCELLED|COMPLETED
+    starts_at         DATETIME2(3) NOT NULL,
+    ends_at           DATETIME2(3) NOT NULL,
+
+    currency_code     CHAR(3) NOT NULL,
+    service_amount    DECIMAL(18,2) NOT NULL,     -- total servicio
+    deposit_amount    DECIMAL(18,2) NOT NULL CONSTRAINT DF_appt_deposit DEFAULT 0, -- pago inicial
+    notes             NVARCHAR(1000) NULL,
+
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_appt_created DEFAULT SYSUTCDATETIME(),
+    updated_at        DATETIME2(3) NOT NULL CONSTRAINT DF_appt_updated DEFAULT SYSUTCDATETIME(),
+    row_version       ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_appointments PRIMARY KEY (appointment_id),
+    CONSTRAINT FK_appt_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_appt_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+    CONSTRAINT FK_appt_customer FOREIGN KEY (customer_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT FK_appt_staff FOREIGN KEY (staff_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_appt_status CHECK (status IN ('PENDING','CONFIRMED','CANCELLED','COMPLETED')),
+    CONSTRAINT CK_appt_time CHECK (ends_at > starts_at),
+    CONSTRAINT CK_appt_amounts CHECK (service_amount >= 0 AND deposit_amount >= 0 AND deposit_amount <= service_amount)
+  );
+
+  CREATE INDEX IX_appt_tenant_starts ON dbo.appointments(tenant_id, starts_at);
+  CREATE INDEX IX_appt_customer_starts ON dbo.appointments(customer_user_id, starts_at);
+END;
+
+IF OBJECT_ID('dbo.appointment_lines','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.appointment_lines (
+    appointment_line_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_appt_line_id DEFAULT NEWSEQUENTIALID(),
+    appointment_id      UNIQUEIDENTIFIER NOT NULL,
+    catalog_item_id     UNIQUEIDENTIFIER NOT NULL, -- SERVICE
+    qty                INT NOT NULL CONSTRAINT DF_appt_qty DEFAULT 1,
+    unit_price         DECIMAL(18,2) NOT NULL,
+
+    line_total AS (CONVERT(DECIMAL(18,2), qty * unit_price)) PERSISTED,
+
+    CONSTRAINT PK_appointment_lines PRIMARY KEY (appointment_line_id),
+    CONSTRAINT FK_appt_line_appt FOREIGN KEY (appointment_id) REFERENCES dbo.appointments(appointment_id),
+    CONSTRAINT FK_appt_line_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+    CONSTRAINT CK_appt_line_qty CHECK (qty > 0),
+    CONSTRAINT CK_appt_line_price CHECK (unit_price >= 0)
+  );
+
+  CREATE INDEX IX_appt_lines_appt ON dbo.appointment_lines(appointment_id);
+END;
+
+
+/* ============================================================
+   G) ORDERS (venta de productos) + lines
+   ============================================================ */
+
+IF OBJECT_ID('dbo.orders','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.orders (
+    order_id          UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_order_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+    branch_id         UNIQUEIDENTIFIER NULL,
+    customer_user_id  UNIQUEIDENTIFIER NOT NULL,
+
+    status            VARCHAR(20) NOT NULL, -- PENDING|PAID|CANCELLED|FULFILLED
+    currency_code     CHAR(3) NOT NULL,
+    subtotal_amount   DECIMAL(18,2) NOT NULL,
+    total_amount      DECIMAL(18,2) NOT NULL,
+
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_order_created DEFAULT SYSUTCDATETIME(),
+    updated_at        DATETIME2(3) NOT NULL CONSTRAINT DF_order_updated DEFAULT SYSUTCDATETIME(),
+    row_version       ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_orders PRIMARY KEY (order_id),
+    CONSTRAINT FK_orders_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_orders_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+    CONSTRAINT FK_orders_customer FOREIGN KEY (customer_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_orders_status CHECK (status IN ('PENDING','PAID','CANCELLED','FULFILLED')),
+    CONSTRAINT CK_orders_amounts CHECK (subtotal_amount >= 0 AND total_amount >= 0 AND total_amount >= subtotal_amount)
+  );
+
+  CREATE INDEX IX_orders_tenant_created ON dbo.orders(tenant_id, created_at);
+  CREATE INDEX IX_orders_customer_created ON dbo.orders(customer_user_id, created_at);
+END;
+
+IF OBJECT_ID('dbo.order_lines','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.order_lines (
+    order_line_id    UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_order_line_id DEFAULT NEWSEQUENTIALID(),
+    order_id         UNIQUEIDENTIFIER NOT NULL,
+    catalog_item_id  UNIQUEIDENTIFIER NOT NULL, -- PRODUCT
+    qty              INT NOT NULL,
+    unit_price       DECIMAL(18,2) NOT NULL,
+
+    line_total AS (CONVERT(DECIMAL(18,2), qty * unit_price)) PERSISTED,
+
+    CONSTRAINT PK_order_lines PRIMARY KEY (order_line_id),
+    CONSTRAINT FK_order_lines_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+    CONSTRAINT FK_order_lines_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+    CONSTRAINT CK_order_lines_qty CHECK (qty > 0),
+    CONSTRAINT CK_order_lines_price CHECK (unit_price >= 0)
+  );
+
+  CREATE INDEX IX_order_lines_order ON dbo.order_lines(order_id);
+END;
+
+
+/* ============================================================
+   H) PAYMENTS (unifica: depósito, pago total, pago de orden)
+      Guarda platform_fee (tu ganancia) + tenant_net
+   ============================================================ */
+
+IF OBJECT_ID('dbo.payments','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.payments (
+    payment_id       UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_payment_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id        UNIQUEIDENTIFIER NOT NULL,
+    customer_user_id UNIQUEIDENTIFIER NOT NULL,
+
+    appointment_id   UNIQUEIDENTIFIER NULL,
+    order_id         UNIQUEIDENTIFIER NULL,
+
+    status           VARCHAR(20) NOT NULL,  -- INITIATED|AUTHORIZED|CAPTURED|FAILED|REFUNDED
+    provider         VARCHAR(30) NULL,      -- YAPE|VISA|CULQI|STRIPE...
+    provider_ref     NVARCHAR(120) NULL,
+
+    currency_code    CHAR(3) NOT NULL,
+
+    amount_total     DECIMAL(18,2) NOT NULL, -- lo que paga el cliente en ESTE pago
+    platform_fee     DECIMAL(18,2) NOT NULL CONSTRAINT DF_pay_fee DEFAULT 0,
+    tenant_net       DECIMAL(18,2) NOT NULL CONSTRAINT DF_pay_net DEFAULT 0,
+
+    created_at       DATETIME2(3) NOT NULL CONSTRAINT DF_pay_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_payments PRIMARY KEY (payment_id),
+    CONSTRAINT FK_pay_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_pay_customer FOREIGN KEY (customer_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT FK_pay_appt FOREIGN KEY (appointment_id) REFERENCES dbo.appointments(appointment_id),
+    CONSTRAINT FK_pay_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+
+    CONSTRAINT CK_pay_status CHECK (status IN ('INITIATED','AUTHORIZED','CAPTURED','FAILED','REFUNDED')),
+    CONSTRAINT CK_pay_ref CHECK (
+      (appointment_id IS NOT NULL AND order_id IS NULL)
+      OR (appointment_id IS NULL AND order_id IS NOT NULL)
+    ),
+    CONSTRAINT CK_pay_amounts CHECK (
+      amount_total >= 0 AND platform_fee >= 0 AND tenant_net >= 0 AND amount_total >= platform_fee
+    )
+  );
+
+  CREATE INDEX IX_payments_tenant_created ON dbo.payments(tenant_id, created_at);
+  CREATE INDEX IX_payments_appt ON dbo.payments(appointment_id);
+  CREATE INDEX IX_payments_order ON dbo.payments(order_id);
+END;
+
+
+/* ============================================================
+   I) Seed categorías base por tenant (SERVICES / PRODUCTS)
+   ============================================================ */
+
+INSERT INTO dbo.tenant_catalog_categories (tenant_id, category_code, name, sort_order)
+SELECT t.tenant_id, 'SERVICES', 'Servicios', 1
+FROM dbo.tenants t
+WHERE t.status = 'ACTIVE'
+  AND NOT EXISTS (
+    SELECT 1 FROM dbo.tenant_catalog_categories c
+    WHERE c.tenant_id = t.tenant_id AND c.category_code = 'SERVICES'
+  );
+
+INSERT INTO dbo.tenant_catalog_categories (tenant_id, category_code, name, sort_order)
+SELECT t.tenant_id, 'PRODUCTS', 'Productos', 2
+FROM dbo.tenants t
+WHERE t.status = 'ACTIVE'
+  AND NOT EXISTS (
+    SELECT 1 FROM dbo.tenant_catalog_categories c
+    WHERE c.tenant_id = t.tenant_id AND c.category_code = 'PRODUCTS'
+  );
+
+
+-----  ajustar  
+
+SET NOCOUNT ON;
+
+/* ============================================================
+   1) ORDER EVENTS
+   ============================================================ */
+IF OBJECT_ID('dbo.order_events','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.order_events (
+        order_event_id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID() PRIMARY KEY,
+        order_id UNIQUEIDENTIFIER NOT NULL,
+        tenant_id UNIQUEIDENTIFIER NOT NULL,
+
+        event_type VARCHAR(40) NOT NULL,
+        old_status VARCHAR(20) NULL,
+        new_status VARCHAR(20) NULL,
+
+        actor_user_id UNIQUEIDENTIFIER NULL,
+        message NVARCHAR(500) NULL,
+        meta_json NVARCHAR(MAX) NULL,
+
+        created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT FK_order_events_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+        CONSTRAINT FK_order_events_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT FK_order_events_actor FOREIGN KEY (actor_user_id) REFERENCES dbo.users(user_id),
+
+        CONSTRAINT CK_order_events_type CHECK (
+            event_type IN ('CREATED','PAID','CANCELLED','FULFILLED','REFUNDED','STATUS_CHANGED','NOTE')
+        )
+    );
+
+    CREATE INDEX IX_order_events_order_created ON dbo.order_events(order_id, created_at);
+END;
+
+
+/* ============================================================
+   2) PAYMENT TRANSACTIONS (Stripe-level)
+   ============================================================ */
+IF OBJECT_ID('dbo.payment_transactions','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.payment_transactions (
+        payment_tx_id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID() PRIMARY KEY,
+        payment_id UNIQUEIDENTIFIER NOT NULL,
+        tenant_id UNIQUEIDENTIFIER NOT NULL,
+
+        provider VARCHAR(30) NOT NULL,
+        operation_type VARCHAR(20) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+
+        idempotency_key VARCHAR(80) NULL,
+        attempt_no INT NOT NULL DEFAULT 1,
+
+        provider_ref NVARCHAR(120) NULL,
+        request_json NVARCHAR(MAX) NULL,
+        response_json NVARCHAR(MAX) NULL,
+
+        error_code VARCHAR(50) NULL,
+        error_message NVARCHAR(400) NULL,
+
+        created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT FK_payment_tx_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+        CONSTRAINT FK_payment_tx_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+
+        CONSTRAINT CK_payment_tx_op CHECK (
+            operation_type IN ('AUTHORIZE','CAPTURE','REFUND','VOID')
+        ),
+
+        CONSTRAINT CK_payment_tx_status CHECK (
+            status IN ('INITIATED','SENT','APPROVED','DECLINED','FAILED')
+        )
+    );
+
+    CREATE INDEX IX_payment_tx_payment ON dbo.payment_transactions(payment_id);
+END;
+
+
+/* ============================================================
+   3) BILLING RULES (COMISIONES FLEXIBLES)
+   ============================================================ */
+IF OBJECT_ID('dbo.billing_rules','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.billing_rules (
+        billing_rule_id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID() PRIMARY KEY,
+        tenant_id UNIQUEIDENTIFIER NOT NULL,
+
+        scope_type VARCHAR(20) NOT NULL,  -- TENANT|CATEGORY|ITEM
+        category_id UNIQUEIDENTIFIER NULL,
+        catalog_item_id UNIQUEIDENTIFIER NULL,
+
+        rule_type VARCHAR(20) NOT NULL,   -- PERCENT|FIXED_FEE|MARKUP
+        percent_rate DECIMAL(6,4) NULL,
+        fixed_fee DECIMAL(18,2) NULL,
+        markup_amount DECIMAL(18,2) NULL,
+
+        min_fee DECIMAL(18,2) NULL,
+        max_fee DECIMAL(18,2) NULL,
+
+        priority INT NOT NULL DEFAULT 100,
+        is_active BIT NOT NULL DEFAULT 1,
+
+        created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT FK_billing_rules_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT FK_billing_rules_category FOREIGN KEY (category_id) REFERENCES dbo.tenant_catalog_categories(category_id),
+        CONSTRAINT FK_billing_rules_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+
+        CONSTRAINT CK_billing_scope CHECK (
+            scope_type IN ('TENANT','CATEGORY','ITEM')
+        ),
+
+        CONSTRAINT CK_billing_type CHECK (
+            rule_type IN ('PERCENT','FIXED_FEE','MARKUP')
+        ),
+
+        CONSTRAINT CK_percent_valid CHECK (
+            percent_rate IS NULL OR (percent_rate >= 0 AND percent_rate <= 1)
+        )
+    );
+
+    CREATE INDEX IX_billing_rules_tenant ON dbo.billing_rules(tenant_id, priority);
+END;
+
+
+/* ============================================================
+   4) INVENTORY MOVEMENTS (KARDEX PRO)
+   ============================================================ */
+IF OBJECT_ID('dbo.inventory_movements','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.inventory_movements (
+        inventory_movement_id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID() PRIMARY KEY,
+        tenant_id UNIQUEIDENTIFIER NOT NULL,
+        branch_id UNIQUEIDENTIFIER NULL,
+        catalog_item_id UNIQUEIDENTIFIER NOT NULL,
+
+        movement_type VARCHAR(20) NOT NULL,
+        qty INT NOT NULL,
+        unit_cost DECIMAL(18,2) NULL,
+        reason NVARCHAR(200) NULL,
+
+        order_id UNIQUEIDENTIFIER NULL,
+        payment_id UNIQUEIDENTIFIER NULL,
+        actor_user_id UNIQUEIDENTIFIER NULL,
+
+        created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT FK_inv_mov_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT FK_inv_mov_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+        CONSTRAINT FK_inv_mov_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+        CONSTRAINT FK_inv_mov_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+        CONSTRAINT FK_inv_mov_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+        CONSTRAINT FK_inv_mov_actor FOREIGN KEY (actor_user_id) REFERENCES dbo.users(user_id),
+
+        CONSTRAINT CK_inv_mov_type CHECK (
+            movement_type IN ('IN','OUT','ADJUST','SALE','RETURN')
+        ),
+
+        CONSTRAINT CK_inv_qty CHECK (qty <> 0)
+    );
+
+    CREATE INDEX IX_inventory_movements_item ON dbo.inventory_movements(catalog_item_id, created_at);
+END;
+
+
+/* ============================================================
+   5) RECEIVABLES (VENTAS A CREDITO)
+   ============================================================ */
+IF OBJECT_ID('dbo.receivables','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.receivables (
+        receivable_id UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID() PRIMARY KEY,
+        tenant_id UNIQUEIDENTIFIER NOT NULL,
+        customer_user_id UNIQUEIDENTIFIER NOT NULL,
+
+        order_id UNIQUEIDENTIFIER NULL,
+
+        currency_code CHAR(3) NOT NULL,
+        total_amount DECIMAL(18,2) NOT NULL,
+        balance_amount DECIMAL(18,2) NOT NULL,
+
+        status VARCHAR(20) NOT NULL,
+        due_at DATETIME2(3) NULL,
+
+        created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT FK_receivable_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT FK_receivable_customer FOREIGN KEY (customer_user_id) REFERENCES dbo.users(user_id),
+        CONSTRAINT FK_receivable_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+
+        CONSTRAINT CK_receivable_status CHECK (
+            status IN ('OPEN','PAID','OVERDUE','CANCELLED')
+        )
+    );
+
+    CREATE INDEX IX_receivable_tenant_status ON dbo.receivables(tenant_id, status);
+END;
+
+
+/* ============================================================
+   PLANETSOFT - ENTERPRISE EXTENSION (DBeaver / SQL Server)
+   - SIN GO
+   - No rompe tu modelo actual (solo crea tablas nuevas + índices y
+     agrega columnas opcionales con ALTER si faltan)
+   Requiere que ya existan:
+   dbo.tenants, dbo.users, dbo.branches, dbo.orders, dbo.payments,
+   dbo.tenant_catalog_items, dbo.tenant_catalog_categories, dbo.appointments
+   ============================================================ */
+
+SET NOCOUNT ON;
+
+DECLARE @sql NVARCHAR(MAX);
+
+/* ============================================================
+   0) ÍNDICES/UNIQUE CLAVE (alta concurrencia)
+   ============================================================ */
+
+-- users(email_normalized) UNIQUE (si no existe)
+IF OBJECT_ID('dbo.users','U') IS NOT NULL
+AND COL_LENGTH('dbo.users','email_normalized') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM sys.indexes
+    WHERE name = 'UX_users_email_normalized'
+      AND object_id = OBJECT_ID('dbo.users')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE UNIQUE INDEX UX_users_email_normalized
+      ON dbo.users(email_normalized)
+      WHERE email_normalized IS NOT NULL;';
+    EXEC sp_executesql @sql;
+  END
+END
+
+-- tenants(tenant_code) UNIQUE (si no existe)
+IF OBJECT_ID('dbo.tenants','U') IS NOT NULL
+AND COL_LENGTH('dbo.tenants','tenant_code') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM sys.indexes
+    WHERE name = 'UX_tenants_tenant_code'
+      AND object_id = OBJECT_ID('dbo.tenants')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE UNIQUE INDEX UX_tenants_tenant_code
+      ON dbo.tenants(tenant_code)
+      WHERE tenant_code IS NOT NULL;';
+    EXEC sp_executesql @sql;
+  END
+END
+
+-- appointments(tenant_id, starts_at)
+IF OBJECT_ID('dbo.appointments','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appointments_tenant_starts'
+      AND object_id=OBJECT_ID('dbo.appointments')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE INDEX IX_appointments_tenant_starts
+      ON dbo.appointments(tenant_id, starts_at);';
+    EXEC sp_executesql @sql;
+  END
+END
+
+-- orders(tenant_id, created_at)
+IF OBJECT_ID('dbo.orders','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_orders_tenant_created'
+      AND object_id=OBJECT_ID('dbo.orders')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE INDEX IX_orders_tenant_created
+      ON dbo.orders(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END
+END
+
+-- payments(tenant_id, created_at)
+IF OBJECT_ID('dbo.payments','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_payments_tenant_created'
+      AND object_id=OBJECT_ID('dbo.payments')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE INDEX IX_payments_tenant_created
+      ON dbo.payments(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END
+END
+
+
+/* ============================================================
+   1) APPOINTMENT EVENTS (auditoría reservas)
+   ============================================================ */
+IF OBJECT_ID('dbo.appointment_events','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.appointment_events (
+    appointment_event_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_appt_event_id DEFAULT NEWSEQUENTIALID(),
+    appointment_id       UNIQUEIDENTIFIER NOT NULL,
+    tenant_id            UNIQUEIDENTIFIER NOT NULL,
+
+    event_type           VARCHAR(40) NOT NULL, -- CREATED|CONFIRMED|CANCELLED|COMPLETED|NO_SHOW|STATUS_CHANGED|NOTE
+    old_status           VARCHAR(20) NULL,
+    new_status           VARCHAR(20) NULL,
+
+    actor_user_id        UNIQUEIDENTIFIER NULL,
+    message              NVARCHAR(500) NULL,
+    meta_json            NVARCHAR(MAX) NULL,
+
+    created_at           DATETIME2(3) NOT NULL CONSTRAINT DF_appt_events_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_appointment_events PRIMARY KEY (appointment_event_id),
+    CONSTRAINT FK_appt_events_appt FOREIGN KEY (appointment_id) REFERENCES dbo.appointments(appointment_id),
+    CONSTRAINT FK_appt_events_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_appt_events_actor FOREIGN KEY (actor_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_appt_events_type CHECK (event_type IN ('CREATED','CONFIRMED','CANCELLED','COMPLETED','NO_SHOW','STATUS_CHANGED','NOTE'))
+  );
+END
+
+IF OBJECT_ID('dbo.appointment_events','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_appt_events_appt_created' AND object_id=OBJECT_ID('dbo.appointment_events'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_appt_events_appt_created ON dbo.appointment_events(appointment_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_appt_events_tenant_created' AND object_id=OBJECT_ID('dbo.appointment_events'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_appt_events_tenant_created ON dbo.appointment_events(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   2) ORDER EVENTS (auditoría ventas)
+   ============================================================ */
+IF OBJECT_ID('dbo.order_events','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.order_events (
+    order_event_id     UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_order_event_id DEFAULT NEWSEQUENTIALID(),
+    order_id           UNIQUEIDENTIFIER NOT NULL,
+    tenant_id          UNIQUEIDENTIFIER NOT NULL,
+
+    event_type         VARCHAR(40) NOT NULL,  -- CREATED|PAID|CANCELLED|FULFILLED|REFUNDED|STATUS_CHANGED|NOTE
+    old_status         VARCHAR(20) NULL,
+    new_status         VARCHAR(20) NULL,
+
+    actor_user_id      UNIQUEIDENTIFIER NULL,
+    message            NVARCHAR(500) NULL,
+    meta_json          NVARCHAR(MAX) NULL,
+
+    created_at         DATETIME2(3) NOT NULL CONSTRAINT DF_order_events_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_order_events PRIMARY KEY (order_event_id),
+    CONSTRAINT FK_order_events_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+    CONSTRAINT FK_order_events_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_order_events_actor FOREIGN KEY (actor_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_order_events_type CHECK (event_type IN ('CREATED','PAID','CANCELLED','FULFILLED','REFUNDED','STATUS_CHANGED','NOTE'))
+  );
+END
+
+IF OBJECT_ID('dbo.order_events','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_order_events_order_created' AND object_id=OBJECT_ID('dbo.order_events'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_order_events_order_created ON dbo.order_events(order_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_order_events_tenant_created' AND object_id=OBJECT_ID('dbo.order_events'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_order_events_tenant_created ON dbo.order_events(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   3) PAYMENT TRANSACTIONS (intentos gateway)
+   ============================================================ */
+IF OBJECT_ID('dbo.payment_transactions','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.payment_transactions (
+    payment_tx_id      UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_payment_tx_id DEFAULT NEWSEQUENTIALID(),
+    payment_id         UNIQUEIDENTIFIER NOT NULL,
+    tenant_id          UNIQUEIDENTIFIER NOT NULL,
+
+    provider           VARCHAR(30) NOT NULL,    -- VISA|YAPE|CULQI|STRIPE|...
+    operation_type     VARCHAR(20) NOT NULL,    -- AUTHORIZE|CAPTURE|REFUND|VOID
+    status             VARCHAR(20) NOT NULL,    -- INITIATED|SENT|APPROVED|DECLINED|FAILED
+
+    idempotency_key    VARCHAR(80) NULL,
+    attempt_no         INT NOT NULL CONSTRAINT DF_payment_tx_attempt DEFAULT 1,
+
+    provider_ref       NVARCHAR(120) NULL,
+    request_json       NVARCHAR(MAX) NULL,
+    response_json      NVARCHAR(MAX) NULL,
+
+    error_code         VARCHAR(50) NULL,
+    error_message      NVARCHAR(400) NULL,
+
+    created_at         DATETIME2(3) NOT NULL CONSTRAINT DF_payment_tx_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_payment_transactions PRIMARY KEY (payment_tx_id),
+    CONSTRAINT FK_payment_tx_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+    CONSTRAINT FK_payment_tx_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT CK_payment_tx_op CHECK (operation_type IN ('AUTHORIZE','CAPTURE','REFUND','VOID')),
+    CONSTRAINT CK_payment_tx_status CHECK (status IN ('INITIATED','SENT','APPROVED','DECLINED','FAILED'))
+  );
+END
+
+IF OBJECT_ID('dbo.payment_transactions','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_payment_tx_payment_created' AND object_id=OBJECT_ID('dbo.payment_transactions'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_payment_tx_payment_created ON dbo.payment_transactions(payment_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_payment_tx_tenant_created' AND object_id=OBJECT_ID('dbo.payment_transactions'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_payment_tx_tenant_created ON dbo.payment_transactions(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_payment_tx_provider_ref' AND object_id=OBJECT_ID('dbo.payment_transactions'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_payment_tx_provider_ref ON dbo.payment_transactions(provider, provider_ref);';
+    EXEC sp_executesql @sql;
+  END;
+
+  -- opcional: evita duplicar reintentos del gateway por tenant + idempotency
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UX_payment_tx_tenant_idem' AND object_id=OBJECT_ID('dbo.payment_transactions'))
+  BEGIN
+    SET @sql = N'
+      CREATE UNIQUE INDEX UX_payment_tx_tenant_idem
+      ON dbo.payment_transactions(tenant_id, idempotency_key, operation_type, attempt_no)
+      WHERE idempotency_key IS NOT NULL;';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   4) PAYMENTS: idempotency_key (enterprise) + índice unique
+      (FIX: índice con SQL dinámico para evitar Invalid column)
+   ============================================================ */
+IF OBJECT_ID('dbo.payments','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.payments','idempotency_key') IS NULL
+  BEGIN
+    ALTER TABLE dbo.payments ADD idempotency_key VARCHAR(80) NULL;
+  END
+
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_payments_tenant_idempotency'
+      AND object_id=OBJECT_ID('dbo.payments')
+  )
+  BEGIN
+    SET @sql = N'
+      CREATE UNIQUE INDEX UX_payments_tenant_idempotency
+      ON dbo.payments(tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;';
+    EXEC sp_executesql @sql;
+  END
+END
+
+
+/* ============================================================
+   5) TENANT BANK ACCOUNTS (para liquidaciones/payouts)
+   ============================================================ */
+IF OBJECT_ID('dbo.tenant_bank_accounts','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_bank_accounts (
+    tenant_bank_account_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_tenant_bank_account_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id              UNIQUEIDENTIFIER NOT NULL,
+
+    bank_name              NVARCHAR(120) NOT NULL,
+    holder_name            NVARCHAR(150) NOT NULL,
+    account_type           VARCHAR(20) NOT NULL, -- CHECKING|SAVINGS
+    currency_code          CHAR(3) NOT NULL,     -- PEN/USD/...
+    account_last4          CHAR(4) NULL,
+    account_ref            NVARCHAR(200) NULL,   -- token/alias seguro (si integras PSP)
+
+    is_default             BIT NOT NULL CONSTRAINT DF_tenant_bank_default DEFAULT 0,
+    status                 VARCHAR(20) NOT NULL CONSTRAINT DF_tenant_bank_status DEFAULT 'ACTIVE',
+
+    created_at             DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_bank_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_tenant_bank_accounts PRIMARY KEY (tenant_bank_account_id),
+    CONSTRAINT FK_tenant_bank_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT CK_tenant_bank_type CHECK (account_type IN ('CHECKING','SAVINGS')),
+    CONSTRAINT CK_tenant_bank_status CHECK (status IN ('ACTIVE','INACTIVE'))
+  );
+END
+
+IF OBJECT_ID('dbo.tenant_bank_accounts','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_tenant_bank_tenant_status' AND object_id=OBJECT_ID('dbo.tenant_bank_accounts'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_tenant_bank_tenant_status ON dbo.tenant_bank_accounts(tenant_id, status);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   6) PAYOUTS (liquidación al tenant)
+   ============================================================ */
+IF OBJECT_ID('dbo.tenant_payouts','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_payouts (
+    tenant_payout_id       UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_tenant_payout_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id              UNIQUEIDENTIFIER NOT NULL,
+    tenant_bank_account_id UNIQUEIDENTIFIER NULL,
+
+    currency_code          CHAR(3) NOT NULL,
+    gross_amount           DECIMAL(18,2) NOT NULL,
+    platform_fee_total     DECIMAL(18,2) NOT NULL,
+    net_amount             DECIMAL(18,2) NOT NULL,
+
+    status                 VARCHAR(20) NOT NULL, -- PENDING|PAID|FAILED|CANCELLED
+    provider               VARCHAR(30) NULL,     -- BANK_TRANSFER|...
+    provider_ref           NVARCHAR(120) NULL,
+
+    period_start           DATETIME2(3) NULL,
+    period_end             DATETIME2(3) NULL,
+
+    paid_at                DATETIME2(3) NULL,
+    created_at             DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_payout_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_tenant_payouts PRIMARY KEY (tenant_payout_id),
+    CONSTRAINT FK_tenant_payouts_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_tenant_payouts_bank FOREIGN KEY (tenant_bank_account_id) REFERENCES dbo.tenant_bank_accounts(tenant_bank_account_id),
+    CONSTRAINT CK_tenant_payouts_status CHECK (status IN ('PENDING','PAID','FAILED','CANCELLED')),
+    CONSTRAINT CK_tenant_payouts_amounts CHECK (
+      gross_amount >= 0 AND platform_fee_total >= 0 AND net_amount >= 0 AND gross_amount >= platform_fee_total
+    )
+  );
+END
+
+IF OBJECT_ID('dbo.tenant_payouts','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_tenant_payouts_tenant_created' AND object_id=OBJECT_ID('dbo.tenant_payouts'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_tenant_payouts_tenant_created ON dbo.tenant_payouts(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_tenant_payouts_status_created' AND object_id=OBJECT_ID('dbo.tenant_payouts'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_tenant_payouts_status_created ON dbo.tenant_payouts(status, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+IF OBJECT_ID('dbo.tenant_payout_lines','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.tenant_payout_lines (
+    tenant_payout_line_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_tenant_payout_line_id DEFAULT NEWSEQUENTIALID(),
+    tenant_payout_id      UNIQUEIDENTIFIER NOT NULL,
+    payment_id            UNIQUEIDENTIFIER NOT NULL,
+
+    amount_total          DECIMAL(18,2) NOT NULL,
+    platform_fee          DECIMAL(18,2) NOT NULL,
+    tenant_net            DECIMAL(18,2) NOT NULL,
+
+    created_at            DATETIME2(3) NOT NULL CONSTRAINT DF_tenant_payout_line_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_tenant_payout_lines PRIMARY KEY (tenant_payout_line_id),
+    CONSTRAINT FK_tenant_payout_lines_payout FOREIGN KEY (tenant_payout_id) REFERENCES dbo.tenant_payouts(tenant_payout_id),
+    CONSTRAINT FK_tenant_payout_lines_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+    CONSTRAINT CK_tenant_payout_lines_amounts CHECK (
+      amount_total >= 0 AND platform_fee >= 0 AND tenant_net >= 0 AND amount_total >= platform_fee
+    )
+  );
+END
+
+IF OBJECT_ID('dbo.tenant_payout_lines','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UX_tenant_payout_lines_unique' AND object_id=OBJECT_ID('dbo.tenant_payout_lines'))
+  BEGIN
+    SET @sql = N'CREATE UNIQUE INDEX UX_tenant_payout_lines_unique ON dbo.tenant_payout_lines(tenant_payout_id, payment_id);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_tenant_payout_lines_payment' AND object_id=OBJECT_ID('dbo.tenant_payout_lines'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_tenant_payout_lines_payment ON dbo.tenant_payout_lines(payment_id);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   7) INVENTORY MOVEMENTS (KARDEX / auditoría stock)
+   ============================================================ */
+IF OBJECT_ID('dbo.inventory_movements','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.inventory_movements (
+    inventory_movement_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_inv_mov_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id             UNIQUEIDENTIFIER NOT NULL,
+    branch_id             UNIQUEIDENTIFIER NULL,
+    catalog_item_id       UNIQUEIDENTIFIER NOT NULL,
+
+    movement_type         VARCHAR(20) NOT NULL,  -- IN|OUT|ADJUST|SALE|RETURN|RESERVE|RELEASE
+    qty                   INT NOT NULL,          -- positivo o negativo
+    unit_cost             DECIMAL(18,2) NULL,
+    reason                NVARCHAR(200) NULL,
+
+    order_id              UNIQUEIDENTIFIER NULL,
+    payment_id            UNIQUEIDENTIFIER NULL,
+    actor_user_id         UNIQUEIDENTIFIER NULL,
+
+    created_at            DATETIME2(3) NOT NULL CONSTRAINT DF_inv_mov_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_inventory_movements PRIMARY KEY (inventory_movement_id),
+    CONSTRAINT FK_inv_mov_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_inv_mov_branch FOREIGN KEY (branch_id) REFERENCES dbo.branches(branch_id),
+    CONSTRAINT FK_inv_mov_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+    CONSTRAINT FK_inv_mov_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+    CONSTRAINT FK_inv_mov_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+    CONSTRAINT FK_inv_mov_actor FOREIGN KEY (actor_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT CK_inv_mov_type CHECK (movement_type IN ('IN','OUT','ADJUST','SALE','RETURN','RESERVE','RELEASE')),
+    CONSTRAINT CK_inv_mov_qty CHECK (qty <> 0)
+  );
+END
+
+IF OBJECT_ID('dbo.inventory_movements','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_inv_mov_tenant_created' AND object_id=OBJECT_ID('dbo.inventory_movements'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_inv_mov_tenant_created ON dbo.inventory_movements(tenant_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_inv_mov_item_created' AND object_id=OBJECT_ID('dbo.inventory_movements'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_inv_mov_item_created ON dbo.inventory_movements(catalog_item_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   8) ACCOUNTS RECEIVABLE (crédito) + pagos parciales
+   ============================================================ */
+IF OBJECT_ID('dbo.receivables','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.receivables (
+    receivable_id     UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_receivable_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+    customer_user_id  UNIQUEIDENTIFIER NOT NULL,
+
+    source_type       VARCHAR(20) NOT NULL,     -- ORDER|APPOINTMENT|MANUAL
+    order_id          UNIQUEIDENTIFIER NULL,
+    appointment_id    UNIQUEIDENTIFIER NULL,
+
+    currency_code     CHAR(3) NOT NULL,
+    total_amount      DECIMAL(18,2) NOT NULL,
+    balance_amount    DECIMAL(18,2) NOT NULL,
+
+    status            VARCHAR(20) NOT NULL,     -- OPEN|PAID|OVERDUE|CANCELLED
+    due_at            DATETIME2(3) NULL,
+    notes             NVARCHAR(400) NULL,
+
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_receivables_created DEFAULT SYSUTCDATETIME(),
+    updated_at        DATETIME2(3) NOT NULL CONSTRAINT DF_receivables_updated DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_receivables PRIMARY KEY (receivable_id),
+    CONSTRAINT FK_receivables_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_receivables_customer FOREIGN KEY (customer_user_id) REFERENCES dbo.users(user_id),
+    CONSTRAINT FK_receivables_order FOREIGN KEY (order_id) REFERENCES dbo.orders(order_id),
+    CONSTRAINT FK_receivables_appt FOREIGN KEY (appointment_id) REFERENCES dbo.appointments(appointment_id),
+    CONSTRAINT CK_receivables_status CHECK (status IN ('OPEN','PAID','OVERDUE','CANCELLED')),
+    CONSTRAINT CK_receivables_source CHECK (source_type IN ('ORDER','APPOINTMENT','MANUAL')),
+    CONSTRAINT CK_receivables_amounts CHECK (total_amount >= 0 AND balance_amount >= 0 AND total_amount >= balance_amount),
+    CONSTRAINT CK_receivables_source_fields CHECK (
+      (source_type='ORDER' AND order_id IS NOT NULL AND appointment_id IS NULL) OR
+      (source_type='APPOINTMENT' AND appointment_id IS NOT NULL AND order_id IS NULL) OR
+      (source_type='MANUAL' AND order_id IS NULL AND appointment_id IS NULL)
+    )
+  );
+END
+
+IF OBJECT_ID('dbo.receivables','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_receivables_tenant_status_due' AND object_id=OBJECT_ID('dbo.receivables'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_receivables_tenant_status_due ON dbo.receivables(tenant_id, status, due_at);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_receivables_customer_status' AND object_id=OBJECT_ID('dbo.receivables'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_receivables_customer_status ON dbo.receivables(customer_user_id, status);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+IF OBJECT_ID('dbo.receivable_payments','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.receivable_payments (
+    receivable_payment_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_receivable_payment_id DEFAULT NEWSEQUENTIALID(),
+    receivable_id         UNIQUEIDENTIFIER NOT NULL,
+    payment_id            UNIQUEIDENTIFIER NULL,
+    amount                DECIMAL(18,2) NOT NULL,
+    created_at            DATETIME2(3) NOT NULL CONSTRAINT DF_receivable_payments_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_receivable_payments PRIMARY KEY (receivable_payment_id),
+    CONSTRAINT FK_receivable_payments_recv FOREIGN KEY (receivable_id) REFERENCES dbo.receivables(receivable_id),
+    CONSTRAINT FK_receivable_payments_payment FOREIGN KEY (payment_id) REFERENCES dbo.payments(payment_id),
+    CONSTRAINT CK_receivable_payments_amount CHECK (amount > 0)
+  );
+END
+
+IF OBJECT_ID('dbo.receivable_payments','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_receivable_payments_recv_created' AND object_id=OBJECT_ID('dbo.receivable_payments'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_receivable_payments_recv_created ON dbo.receivable_payments(receivable_id, created_at);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   9) BILLING RULES (reglas de comisión/markup por item/categoría)
+   ============================================================ */
+IF OBJECT_ID('dbo.billing_rules','U') IS NULL
+BEGIN
+  CREATE TABLE dbo.billing_rules (
+    billing_rule_id   UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_billing_rule_id DEFAULT NEWSEQUENTIALID(),
+    tenant_id         UNIQUEIDENTIFIER NOT NULL,
+
+    scope_type        VARCHAR(20) NOT NULL,  -- TENANT|INDUSTRY|CATEGORY|ITEM
+    industry_code     VARCHAR(40) NULL,
+    category_id       UNIQUEIDENTIFIER NULL,
+    catalog_item_id   UNIQUEIDENTIFIER NULL,
+
+    rule_type         VARCHAR(20) NOT NULL,  -- PERCENT|FIXED_FEE|MARKUP
+    percent_rate      DECIMAL(6,4) NULL,     -- 0.25 = 25%
+    fixed_fee         DECIMAL(18,2) NULL,    -- 5.00
+    markup_amount     DECIMAL(18,2) NULL,    -- +5.00
+
+    min_fee           DECIMAL(18,2) NULL,
+    max_fee           DECIMAL(18,2) NULL,
+
+    priority          INT NOT NULL CONSTRAINT DF_billing_rules_prio DEFAULT 100, -- menor gana
+    is_active         BIT NOT NULL CONSTRAINT DF_billing_rules_active DEFAULT 1,
+
+    valid_from        DATETIME2(3) NULL,
+    valid_to          DATETIME2(3) NULL,
+
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_billing_rules_created DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT PK_billing_rules PRIMARY KEY (billing_rule_id),
+    CONSTRAINT FK_billing_rules_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_billing_rules_category FOREIGN KEY (category_id) REFERENCES dbo.tenant_catalog_categories(category_id),
+    CONSTRAINT FK_billing_rules_item FOREIGN KEY (catalog_item_id) REFERENCES dbo.tenant_catalog_items(catalog_item_id),
+
+    CONSTRAINT CK_billing_rules_scope CHECK (scope_type IN ('TENANT','INDUSTRY','CATEGORY','ITEM')),
+    CONSTRAINT CK_billing_rules_type CHECK (rule_type IN ('PERCENT','FIXED_FEE','MARKUP')),
+
+    CONSTRAINT CK_billing_rules_scope_fields CHECK (
+      (scope_type = 'TENANT'   AND industry_code IS NULL AND category_id IS NULL AND catalog_item_id IS NULL) OR
+      (scope_type = 'INDUSTRY' AND industry_code IS NOT NULL AND category_id IS NULL AND catalog_item_id IS NULL) OR
+      (scope_type = 'CATEGORY' AND category_id IS NOT NULL AND industry_code IS NULL AND catalog_item_id IS NULL) OR
+      (scope_type = 'ITEM'     AND catalog_item_id IS NOT NULL AND industry_code IS NULL AND category_id IS NULL)
+    ),
+
+    CONSTRAINT CK_billing_rules_type_fields CHECK (
+      (rule_type = 'PERCENT'   AND percent_rate IS NOT NULL AND fixed_fee IS NULL AND markup_amount IS NULL) OR
+      (rule_type = 'FIXED_FEE' AND fixed_fee IS NOT NULL AND percent_rate IS NULL AND markup_amount IS NULL) OR
+      (rule_type = 'MARKUP'    AND markup_amount IS NOT NULL AND percent_rate IS NULL AND fixed_fee IS NULL)
+    ),
+
+    CONSTRAINT CK_billing_rules_rates CHECK (
+      (percent_rate IS NULL OR (percent_rate >= 0 AND percent_rate <= 1))
+    )
+  );
+END
+
+IF OBJECT_ID('dbo.billing_rules','U') IS NOT NULL
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_billing_rules_tenant_active_prio' AND object_id=OBJECT_ID('dbo.billing_rules'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_billing_rules_tenant_active_prio ON dbo.billing_rules(tenant_id, is_active, priority);';
+    EXEC sp_executesql @sql;
+  END;
+
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_billing_rules_scope' AND object_id=OBJECT_ID('dbo.billing_rules'))
+  BEGIN
+    SET @sql = N'CREATE INDEX IX_billing_rules_scope ON dbo.billing_rules(scope_type, tenant_id);';
+    EXEC sp_executesql @sql;
+  END;
+END;
+
+
+/* ============================================================
+   10) SEED OPCIONAL (comentado)
+   ============================================================ */
+/*
+INSERT INTO dbo.billing_rules(tenant_id, scope_type, rule_type, percent_rate, priority, is_active)
+SELECT t.tenant_id, 'TENANT', 'PERCENT', 0.08, 200, 1
+FROM dbo.tenants t
+WHERE t.status = 'ACTIVE'
+  AND NOT EXISTS (
+    SELECT 1 FROM dbo.billing_rules br
+    WHERE br.tenant_id = t.tenant_id AND br.scope_type='TENANT'
+  );
+*/
+
+PRINT '✅ PlanetSoft Enterprise Extension aplicado SIN GO (DBeaver friendly).';
+
+
+/* ============================================================
+   PLANETSOFT - PRO HARDENING PATCH (SQL Server / DBeaver)
+   - SIN GO
+   - 100% idempotente (solo agrega si falta)
+   - Evita "Invalid column name" usando SQL dinámico cuando corresponde
+   - No rompe tu modelo actual
+   ============================================================ */
+
+SET NOCOUNT ON;
+
+PRINT '=== PlanetSoft PRO Hardening Patch: START ===';
+
+------------------------------------------------------------
+-- 0) Helpers: crea índices sólo si no existen (con EXEC)
+------------------------------------------------------------
+
+/* ============================================================
+   1) SOFT DELETE (opcional pero MUY pro)
+   - agrega is_deleted + deleted_at en tablas core
+   ============================================================ */
+DECLARE @sql NVARCHAR(MAX);
+
+-- Lista de tablas a endurecer con soft delete (ajusta si quieres)
+DECLARE @SoftDelete TABLE (table_name SYSNAME);
+INSERT INTO @SoftDelete(table_name)
+VALUES
+('users'),
+('tenants'),
+('branches'),
+('tenant_catalog_items'),
+('tenant_catalog_categories'),
+('orders'),
+('order_lines'),
+('payments'),
+('appointments'),
+('appointment_lines');
+
+DECLARE @t SYSNAME;
+
+DECLARE cur_sd CURSOR LOCAL FAST_FORWARD FOR
+SELECT table_name FROM @SoftDelete;
+
+OPEN cur_sd;
+FETCH NEXT FROM cur_sd INTO @t;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+  IF OBJECT_ID(CONCAT('dbo.', @t), 'U') IS NOT NULL
+  BEGIN
+    IF COL_LENGTH(CONCAT('dbo.', @t), 'is_deleted') IS NULL
+    BEGIN
+      SET @sql = CONCAT('ALTER TABLE dbo.', @t, ' ADD is_deleted BIT NOT NULL CONSTRAINT DF_', @t, '_is_deleted DEFAULT 0;');
+      EXEC(@sql);
+    END;
+
+    IF COL_LENGTH(CONCAT('dbo.', @t), 'deleted_at') IS NULL
+    BEGIN
+      SET @sql = CONCAT('ALTER TABLE dbo.', @t, ' ADD deleted_at DATETIME2(3) NULL;');
+      EXEC(@sql);
+    END;
+
+    -- Índice filtrado para queries “activos”
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name = CONCAT('IX_', @t, '_not_deleted')
+        AND object_id = OBJECT_ID(CONCAT('dbo.', @t))
+    )
+    BEGIN
+      -- Solo si existe is_deleted
+      IF COL_LENGTH(CONCAT('dbo.', @t), 'is_deleted') IS NOT NULL
+      BEGIN
+        SET @sql = CONCAT('CREATE INDEX IX_', @t, '_not_deleted ON dbo.', @t, '(is_deleted) WHERE is_deleted = 0;');
+        EXEC(@sql);
+      END
+    END
+  END
+
+  FETCH NEXT FROM cur_sd INTO @t;
+END
+
+CLOSE cur_sd;
+DEALLOCATE cur_sd;
+
+
+------------------------------------------------------------
+-- 2) GEOLOCALIZACIÓN EN BRANCHES (para mapa tipo Fresha)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.branches','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.branches','latitude') IS NULL
+    EXEC('ALTER TABLE dbo.branches ADD latitude DECIMAL(9,6) NULL;');
+
+  IF COL_LENGTH('dbo.branches','longitude') IS NULL
+    EXEC('ALTER TABLE dbo.branches ADD longitude DECIMAL(9,6) NULL;');
+
+  IF COL_LENGTH('dbo.branches','geo_hash') IS NULL
+    EXEC('ALTER TABLE dbo.branches ADD geo_hash VARCHAR(16) NULL;'); -- opcional (geohash para búsquedas rápidas)
+
+  -- Índice para “cercanos” (base)
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_branches_geo_lat_lng'
+      AND object_id=OBJECT_ID('dbo.branches')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_branches_geo_lat_lng ON dbo.branches(latitude, longitude) WHERE latitude IS NOT NULL AND longitude IS NOT NULL;');
+  END
+
+  -- Índice por tenant (típico en multi-tenant)
+  IF COL_LENGTH('dbo.branches','tenant_id') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_branches_tenant'
+      AND object_id=OBJECT_ID('dbo.branches')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_branches_tenant ON dbo.branches(tenant_id);');
+  END
+
+  -- Unicidad: (tenant_id, branch_code) si branch_code existe
+  IF COL_LENGTH('dbo.branches','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.branches','branch_code') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_branches_tenant_branch_code'
+      AND object_id=OBJECT_ID('dbo.branches')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_branches_tenant_branch_code ON dbo.branches(tenant_id, branch_code) WHERE branch_code IS NOT NULL;');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 3) USERS / TENANTS: índices únicos críticos
+------------------------------------------------------------
+IF OBJECT_ID('dbo.users','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.users','email_normalized') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_users_email_normalized'
+      AND object_id=OBJECT_ID('dbo.users')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_users_email_normalized ON dbo.users(email_normalized) WHERE email_normalized IS NOT NULL;');
+  END
+
+  IF COL_LENGTH('dbo.users','phone_e164') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_users_phone_e164'
+      AND object_id=OBJECT_ID('dbo.users')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_users_phone_e164 ON dbo.users(phone_e164) WHERE phone_e164 IS NOT NULL;');
+  END
+END;
+
+IF OBJECT_ID('dbo.tenants','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.tenants','tenant_code') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_tenants_tenant_code'
+      AND object_id=OBJECT_ID('dbo.tenants')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_tenants_tenant_code ON dbo.tenants(tenant_code) WHERE tenant_code IS NOT NULL;');
+  END
+
+  IF COL_LENGTH('dbo.tenants','industry') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_tenants_industry'
+      AND object_id=OBJECT_ID('dbo.tenants')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_tenants_industry ON dbo.tenants(industry) WHERE industry IS NOT NULL;');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 4) CATÁLOGO: SKU único por tenant (solo productos)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.tenant_catalog_items','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.tenant_catalog_items','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.tenant_catalog_items','sku') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_items_tenant_sku'
+      AND object_id=OBJECT_ID('dbo.tenant_catalog_items')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_items_tenant_sku
+          ON dbo.tenant_catalog_items(tenant_id, sku)
+          WHERE sku IS NOT NULL;');
+  END
+
+  IF COL_LENGTH('dbo.tenant_catalog_items','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.tenant_catalog_items','item_type') IS NOT NULL
+  AND COL_LENGTH('dbo.tenant_catalog_items','is_active') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_items_tenant_type_active'
+      AND object_id=OBJECT_ID('dbo.tenant_catalog_items')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_items_tenant_type_active ON dbo.tenant_catalog_items(tenant_id, item_type, is_active);');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 5) APPOINTMENTS: índices pro (calendar queries)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.appointments','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.appointments','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.appointments','starts_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appointments_tenant_starts'
+      AND object_id=OBJECT_ID('dbo.appointments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_appointments_tenant_starts ON dbo.appointments(tenant_id, starts_at);');
+  END
+
+  IF COL_LENGTH('dbo.appointments','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.appointments','status') IS NOT NULL
+  AND COL_LENGTH('dbo.appointments','starts_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appointments_tenant_status_starts'
+      AND object_id=OBJECT_ID('dbo.appointments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_appointments_tenant_status_starts ON dbo.appointments(tenant_id, status, starts_at);');
+  END
+
+  IF COL_LENGTH('dbo.appointments','customer_user_id') IS NOT NULL
+  AND COL_LENGTH('dbo.appointments','starts_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appointments_customer_starts'
+      AND object_id=OBJECT_ID('dbo.appointments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_appointments_customer_starts ON dbo.appointments(customer_user_id, starts_at);');
+  END
+
+  IF COL_LENGTH('dbo.appointments','staff_user_id') IS NOT NULL
+  AND COL_LENGTH('dbo.appointments','starts_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appointments_staff_starts'
+      AND object_id=OBJECT_ID('dbo.appointments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_appointments_staff_starts ON dbo.appointments(staff_user_id, starts_at) WHERE staff_user_id IS NOT NULL;');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 6) ORDERS: índices pro (ventas/pos)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.orders','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.orders','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.orders','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_orders_tenant_created'
+      AND object_id=OBJECT_ID('dbo.orders')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_orders_tenant_created ON dbo.orders(tenant_id, created_at);');
+  END
+
+  IF COL_LENGTH('dbo.orders','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.orders','status') IS NOT NULL
+  AND COL_LENGTH('dbo.orders','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_orders_tenant_status_created'
+      AND object_id=OBJECT_ID('dbo.orders')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_orders_tenant_status_created ON dbo.orders(tenant_id, status, created_at);');
+  END
+
+  IF COL_LENGTH('dbo.orders','customer_user_id') IS NOT NULL
+  AND COL_LENGTH('dbo.orders','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_orders_customer_created'
+      AND object_id=OBJECT_ID('dbo.orders')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_orders_customer_created ON dbo.orders(customer_user_id, created_at);');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 7) PAYMENTS: idempotency enterprise + índices críticos
+------------------------------------------------------------
+IF OBJECT_ID('dbo.payments','U') IS NOT NULL
+BEGIN
+  -- 7.1 idempotency_key (para evitar doble cobro por reintento)
+  IF COL_LENGTH('dbo.payments','idempotency_key') IS NULL
+    EXEC('ALTER TABLE dbo.payments ADD idempotency_key VARCHAR(80) NULL;');
+
+  IF COL_LENGTH('dbo.payments','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.payments','idempotency_key') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_payments_tenant_idempotency'
+      AND object_id=OBJECT_ID('dbo.payments')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_payments_tenant_idempotency
+          ON dbo.payments(tenant_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;');
+  END
+
+  -- 7.2 índice para reporting y conciliación
+  IF COL_LENGTH('dbo.payments','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.payments','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_payments_tenant_created'
+      AND object_id=OBJECT_ID('dbo.payments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_payments_tenant_created ON dbo.payments(tenant_id, created_at);');
+  END
+
+  IF COL_LENGTH('dbo.payments','provider') IS NOT NULL
+  AND COL_LENGTH('dbo.payments','provider_ref') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_payments_provider_ref'
+      AND object_id=OBJECT_ID('dbo.payments')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_payments_provider_ref ON dbo.payments(provider, provider_ref) WHERE provider_ref IS NOT NULL;');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 8) PAYMENT_TRANSACTIONS: refuerzos pro (reintentos, únicos)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.payment_transactions','U') IS NOT NULL
+BEGIN
+  -- Un intento por payment + attempt_no
+  IF COL_LENGTH('dbo.payment_transactions','payment_id') IS NOT NULL
+  AND COL_LENGTH('dbo.payment_transactions','attempt_no') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_payment_tx_payment_attempt'
+      AND object_id=OBJECT_ID('dbo.payment_transactions')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_payment_tx_payment_attempt ON dbo.payment_transactions(payment_id, attempt_no);');
+  END
+
+  -- Un idempotency_key por provider/operation dentro de un payment (si usas eso)
+  IF COL_LENGTH('dbo.payment_transactions','payment_id') IS NOT NULL
+  AND COL_LENGTH('dbo.payment_transactions','operation_type') IS NOT NULL
+  AND COL_LENGTH('dbo.payment_transactions','idempotency_key') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_payment_tx_idem'
+      AND object_id=OBJECT_ID('dbo.payment_transactions')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_payment_tx_idem
+          ON dbo.payment_transactions(payment_id, operation_type, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 9) EVENTS: índices para auditoría (ORDER/APPOINTMENT)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.order_events','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.order_events','order_id') IS NOT NULL
+  AND COL_LENGTH('dbo.order_events','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_order_events_order_created'
+      AND object_id=OBJECT_ID('dbo.order_events')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_order_events_order_created ON dbo.order_events(order_id, created_at);');
+  END
+END;
+
+IF OBJECT_ID('dbo.appointment_events','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.appointment_events','appointment_id') IS NOT NULL
+  AND COL_LENGTH('dbo.appointment_events','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_appt_events_appt_created'
+      AND object_id=OBJECT_ID('dbo.appointment_events')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_appt_events_appt_created ON dbo.appointment_events(appointment_id, created_at);');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 10) INVENTORY: índices para stock (alta concurrencia)
+------------------------------------------------------------
+IF OBJECT_ID('dbo.inventory_items','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.inventory_items','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.inventory_items','catalog_item_id') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_inventory_tenant_item'
+      AND object_id=OBJECT_ID('dbo.inventory_items')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_inventory_tenant_item ON dbo.inventory_items(tenant_id, catalog_item_id);');
+  END
+END;
+
+IF OBJECT_ID('dbo.inventory_movements','U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.inventory_movements','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.inventory_movements','created_at') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='IX_inv_mov_tenant_created'
+      AND object_id=OBJECT_ID('dbo.inventory_movements')
+  )
+  BEGIN
+    EXEC('CREATE INDEX IX_inv_mov_tenant_created ON dbo.inventory_movements(tenant_id, created_at);');
+  END
+END;
+
+
+------------------------------------------------------------
+-- 11) RECEIVABLES: evitar duplicados por source
+------------------------------------------------------------
+IF OBJECT_ID('dbo.receivables','U') IS NOT NULL
+BEGIN
+  -- Solo 1 receivable por ORDER (si order_id existe)
+  IF COL_LENGTH('dbo.receivables','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.receivables','order_id') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_receivables_tenant_order'
+      AND object_id=OBJECT_ID('dbo.receivables')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_receivables_tenant_order
+          ON dbo.receivables(tenant_id, order_id)
+          WHERE order_id IS NOT NULL;');
+  END
+
+  -- Solo 1 receivable por APPOINTMENT (si appointment_id existe)
+  IF COL_LENGTH('dbo.receivables','tenant_id') IS NOT NULL
+  AND COL_LENGTH('dbo.receivables','appointment_id') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name='UX_receivables_tenant_appt'
+      AND object_id=OBJECT_ID('dbo.receivables')
+  )
+  BEGIN
+    EXEC('CREATE UNIQUE INDEX UX_receivables_tenant_appt
+          ON dbo.receivables(tenant_id, appointment_id)
+          WHERE appointment_id IS NOT NULL;');
+  END
+END;
+
+
+PRINT '=== PlanetSoft PRO Hardening Patch: DONE ===';
